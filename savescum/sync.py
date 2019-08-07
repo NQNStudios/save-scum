@@ -1,30 +1,27 @@
 import tarfile
 import boto3
-import sys
 import os
 import commentjson
 import requests
 import glob
 from datetime import datetime, timezone, timedelta
+from savescum.logs import log
+from savescum import config
 
-def log(message):
-    ''' Print sync output to a Discord channel so we always know what's going on
-    '''
-    print(message)
-    # source: https://makerhacks.com/python-messages-discord/	
-    webhook_url = "https://discordapp.com/api/webhooks/605821430524805122/XyLcccGOgKmEaNmzO1vAS-dgSVHj1H6FoYzx8pLgsAN64BncqAdpVi14jm76XoaNgRpZ"
-    r = requests.post(webhook_url, data = {"content": message})
-    
+def resolve_host_dir(directory):
+    if directory[0] in '~/':
+        return os.path.expanduser(host_dir)
+    else:
+        return '{}/{}'.format(os.getcwd(), host_dir)
+
+
 def mount_backup(key, config):
-    ''' Print the CLI flag required to mount the given backup directory to the server's Docker instance
+    ''' Print the `docker run` CLI flag required to mount the given backup directory to a docker instance
     '''
 
     # The json key "host-dir" is relative to the working directory by default
     host_dir = config['host-dir']
-    if host_dir[0] in '~/':
-        host_dir=os.path.expanduser(host_dir)
-    else:
-        host_dir='{}/{}'.format(os.getcwd(), host_dir)
+    host_dir = resolve_host_dir(host_dir)
 
     # Create the directory if it doesn't exist
     if not os.path.exists(host_dir):
@@ -50,12 +47,25 @@ def mount_backup(key, config):
 
     for i in range(len(sources)):
         print(' --mount type=bind,source={},target={}'.format(sources[i], targets[i]))
-	
-def upload_backup(key, config, bucket_name):
-    ''' Generate a tar file for the given backup directory and upload it
+
+def most_recent_change(directory):
+    max_mtime = 0
+    for dirname,subdirs,files in os.walk(directory):
+        for fname in files:
+            full_path = os.path.join(dirname, fname)
+            mtime = os.path.mtime(full_path)
+            if mtime > max_mtime:
+                max_mtime = mtime
+                max_dir = dirname
+                max_file = fname
+    return datetime.fromtimestamp(max_mtime)
+                        
+
+def upload_backup(key, json, last_modified_times, s3, bucket_name):
+    ''' Generate a `.tar.gz` file for the given backup directory and upload it
     '''
 
-    if 's3-upload' not in config or config['s3-upload'] == 'never':
+    if 's3-upload' not in json or json['s3-upload'] == 'never':
         # log("{} never uploads a backup".format(key))
         return
     
@@ -66,8 +76,16 @@ def upload_backup(key, config, bucket_name):
     if archive_path in last_modified_times:
         last_modified = last_modified_times[archive_path]
 
+            
     elapsed_time = datetime.now().replace(tzinfo=timezone.utc) - last_modified
-    upload_interval = config['s3-upload']
+    upload_interval = json['s3-upload']
+
+    # TODO use most_recent_change on either the host-dir or container-dir as the case may be    
+    # if json['s3-upload'] == 'on-change':
+    #    last_local_change = most_recent_change(
+    if json['s3-upload'] == 'on-change':
+        upload_interval = "1m"
+    
     days=0
     hours=0
     minutes=0
@@ -92,106 +110,89 @@ def upload_backup(key, config, bucket_name):
         return
     else:
         log('uploading a new backup for {} to bucket {}. Last upload was {}'.format(key, bucket_name, last_modified))
+
         
     with tarfile.open(archive_path, 'w:gz') as upload_file:
-        container_dir = config['container-dir']
+        in_container='container-dir' in json
+        # Quick-and-dirty check for whether we're in a container or not:
+        if os.path.exists(json['host-dir']):
+            in_container=False
 
-        mount_enclosing_dir = 'mount-enclosing-dir' not in config or config['mount-enclosing-dir'] == True
+        targets=[os.path.expanduser(json['host-dir'])]
+        if in_container:
+            container_dir = json['container-dir']
 
-        targets=[]
-        if not mount_enclosing_dir:
-            manifest_path='/{}.json'.format(key)
-            with open(manifest_path, 'r') as manifest:
-                targets = commentjson.load(manifest)
-        else:
-            # if the container dir is not fully specified, fill it out
-            if container_dir[-1] == '/':
-                host_dir = config['host-dir']
-                last_slash_idx = host_dir.rfind('/')
-                container_dir += host_dir[last_slash_idx+1:]
-            targets=[container_dir]
+            mount_enclosing_dir = 'mount-enclosing-dir' not in json or json['mount-enclosing-dir'] == True
+
+        
+            if not mount_enclosing_dir:
+                manifest_path='/{}.json'.format(key)
+                with open(manifest_path, 'r') as manifest:
+                    targets = commentjson.load(manifest)
+            else:
+                # if the container dir is not fully specified, fill it out
+                if container_dir[-1] == '/':
+                    host_dir = json['host-dir']
+                    last_slash_idx = host_dir.rfind('/')
+                    container_dir += host_dir[last_slash_idx+1:]
+                targets=[container_dir]
+
         for target in targets:
             upload_file.add(target)
             log('adding {} to archive'.format(target))
 
-    log('Uploading {} as archive {} to S3 key {}'.format(container_dir, archive_path, bucket_name))
+    log('Uploading target {} as archive {} to S3 key {}'.format(key, archive_path, bucket_name))
     s3.upload_file(archive_path, bucket_name, archive_path)
 
-def download_backup(key, config, bucket_name):
+def download_backup(key, json, bucket_name):
     ''' Download a tar file for the given backup directory and unzip it where it belongs
     '''
 
-#       s3.download_file('minerl-server-backup', 'synced-worlds.tar', './synced-worlds.tar')
-#        s3.download_file('minerl-server-backup', 'playerdata.tar', './playerdata.tar')
-# with open('./synced-worlds.tar', 'rb') as download_file:
+#       s3.download_file('{bucket}', '{file}.tar.gz', './{local-file}..tar.gz
+
+# with open('{local-file}.tar.gz', 'rb') as download_file:
 #            tar = tarfile.TarFile(fileobj=download_file, mode='r:gz')
 #            tar.extractall()
-            
+
+# TODO put it where it belongs
 #            tar.close()
 
-#        with open('./playerdata.tar', 'rb') as download_file:
-#            tar = tarfile.TarFile(fileobj=download_file, mode='r:gz')
-#            tar.extractall()
-            
-#            tar.close()
+#        os.remove('./{local-file}.tar.gz')
 
-#        os.remove('./synced-worlds.tar')
-#        os.remove('./playerdata.tar')
 
     
     pass
 
-bucket_name=''
-s3=None
-bucket=None
-last_modified_times={}
-if __name__ == "__main__":
+def sync_all_targets(command):
+    ''' Command must be 'up', 'down', or 'mount'
+    '''
     try:
         # Load the file that defines bind mounts and s3 sync behavior
-        sync_config=None
-        with open('./sync-config.json', 'r') as f:
-            sync_config = commentjson.load(f)
-
+        sync_json=config.json()['targets']
+       
         # mount is not like the other 2 commands. it just prints bash arguments
-        if sys.argv[1] == 'mount':
-            for backup_file in sync_config.keys():
-                mount_backup(backup_file, sync_config[backup_file])
+        if command == 'mount':
+            for backup_file in sync_json.keys():
+                mount_backup(backup_file, sync_json[backup_file])
             exit()
             
             
-        # Sync dev instance files to a different s3 file prefix to avoid mixing them up
-        bucket_name = 'minerl-server-backup'
-        if 'MODE' not in os.environ or os.environ['MODE'] == 'dev':
-            bucket_name += '-dev' 
+        bucket_name = config.json()['storage']['s3']['bucket']
    
-        # log('----------------------------------------------------')
-        # log('world-sync.py *{}* called at {} for prefix {}'.format(sys.argv[1], str(datetime.now()), bucket_name))
-            
-        ############### TESTING
-
-        #mount_backup('persistent-worlds', sync_config['persistent-worlds'])
-        #mount_backup('herobraine-playerdata', sync_config['herobraine-playerdata'])
-        #mount_backup('aws-creds', sync_config['aws-creds'])
-        # upload_backup('persistent-worlds', sync_config['persistent-worlds'])
-        # upload_backup('herobraine-playerdata', sync_config['herobraine-playerdata'])
-
-        #exit()
-
-        ############### END TESTING    
-
         s3 = boto3.client('s3')
         s3_r = boto3.resource('s3')
         bucket = s3_r.Bucket(bucket_name)
 
         # Calculate last modified times
+        last_modified_times={}
         for key in bucket.objects.all():
             last_modified_times[key.key] = key.last_modified
         
-        for backup_file in sync_config.keys():
-            if sys.argv[1] == "up":
-                upload_backup(backup_file, sync_config[backup_file], bucket_name)
-            elif sys.argv[1] == "down":
-                download_backup(backup_file, sync_config[backup_file], bucket_name)
+        for backup_file in sync_json.keys():
+            if command == "up":
+                upload_backup(backup_file, sync_json[backup_file], last_modified_times, s3, bucket_name)
+            elif command == "down":
+                download_backup(backup_file, sync_json[backup_file], bucket_name)
             else:
                 log('Error: worldsync script must be called with a valid subcommand')
                 

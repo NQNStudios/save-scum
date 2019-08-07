@@ -13,6 +13,11 @@
 				"discord-webhook": "", // Add the URL for a Discord webhook to log to a private channel
 				"downmail": {} // Add DownMail-compatible config here, and a recipient address with key 'sendTo', for logging to email (more error-prone)
 		},
+		"storage": {
+				"s3": {
+						"bucket": "" // S3 storage relies on your system having credentials stored in ~/.aws and specifying a writable bucket here
+				}
+		},
 		"targets": {
 				// Steamplay prefixes (bound to have your savegame in there somewhere!)
 				"proton-prefixes": {
