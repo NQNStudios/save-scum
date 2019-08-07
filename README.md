@@ -1,2 +1,2 @@
 # save-scum
-Automated version control for retro gaming save files on Linux. In Carp, for fun.
+Selectively version control your system. Good for game saves. S3/Python
