@@ -1,0 +1,28 @@
+// This file contains configuration for which system directories
+// should be synced with Amazon S3 for automatic backups, and for
+// how often.
+
+// Every directory in this config file can also be configured
+// for automatic bind-mounting to a Docker container, which will
+// be equally syncable within the container.
+
+// Because save-scum uses commentjson, comments are allowed in this
+// file.
+{
+		"logging": {
+				"discord-webhook": "", // Add the URL for a Discord webhook to log to a private channel
+				"downmail": {} // Add DownMail-compatible config here, and a recipient address with key 'sendTo', for logging to email (more error-prone)
+		},
+		"targets": {
+				// Steamplay prefixes (bound to have your savegame in there somewhere!)
+				"proton-prefixes": {
+						"host-dir": "~/.steam/steam/steamapps/compatdata",
+						"s3-upload": "on-change"
+				},
+
+				"emacs-config": {
+						"host-dir": "~/.emacs.d",
+						"s3-upload": "on-change"
+				}
+		}
+}

@@ -8,4 +8,6 @@ setup(name='save-scum',
       author_email='natquaylenelson@gmail.com',
       license='GPL-3.0',
       packages=['savescum'],
+      install_requires=[i.strip() for i in open("requirements.txt").readlines()],
+      include_package_data=True,
       zip_safe=False)
